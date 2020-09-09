@@ -1,1 +1,3 @@
-# blackbox-hub-monitoring
+# Blackbox monitoring app for JupyterHubs
+
+Uses hubtraf,....
