@@ -4,8 +4,8 @@ setup(
     name="hub_metrics_collector",
     version="0.1",
     description="Blackbox monitoring app for JupyterHubs",
-    author="Project Jupyter Contributors",
-    author_email="jupyter@googlegroups.com",
+    author="Georgiana D",
+    author_email="georgiana.dolocan@gmail.com",
     packages=find_packages(),
     platforms="any",
     install_requires=[
