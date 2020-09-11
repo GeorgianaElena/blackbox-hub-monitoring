@@ -9,53 +9,72 @@ from tornado.ioloop import IOLoop
 from tornado.web import Application
 from tornado.web import authenticated
 from tornado.web import RequestHandler
+from jupyterhub.utils import url_path_join
+import requests
 
-SERVER_STARTED = Gauge("server_started", "whether or not the user's server started")
+CHECK_COMPLETED = Gauge(
+    "check_completed", "whether or not hubtraf-check completed successfully"
+)
 
 from jupyterhub.services.auth import HubAuthenticated
 
-def get_args():
-    argparser = argparse.ArgumentParser()
-    argparser.add_argument(
-        "hub_url", help="Hub URL to send traffic to (without a trailing /)"
-    )
-    args = argparser.parse_args()
-
-    return args
 
 class HubMetricsHandler(HubAuthenticated, RequestHandler):
-    def initialize(self, registry=REGISTRY):
+    def initialize(self, args, registry=REGISTRY):
+        self.args = args
         self.registry = registry
 
     @authenticated
     async def get(self):
-        args = get_args()
-        subprocess.check_output([
-            "hubtraf-check",
-            args.hub_url,
-            os.environ['JUPYTERHUB_SERVICE_NAME'],
-        ])
+        args = self.args
 
-        encoder, content_type = exposition.choose_encoder(self.request.headers.get('Accept'))
-        self.set_header('Content-Type', content_type)
+        out = subprocess.check_output(["hubtraf-check", args.hub_url, args.username])
+        print(out)
+
+        encoder, content_type = exposition.choose_encoder(
+            self.request.headers.get("Accept")
+        )
+        self.set_header("Content-Type", content_type)
         self.write(encoder(self.registry))
 
 
 def main():
+    argparser = argparse.ArgumentParser()
+    argparser.add_argument(
+        "hub_url", help="Hub URL to send traffic to (without a trailing /)"
+    )
+    argparser.add_argument("username", help="Name of the user")
+    args = argparser.parse_args()
+
+    api_token = os.environ["JUPYTERHUB_API_TOKEN"]
+    api_url = os.environ["JUPYTERHUB_API_URL"]
+
+    # Request a token for the user
+    token_request_url = url_path_join(api_url, "/users/monitor/tokens")
+    resp = requests.post(
+        token_request_url, headers={"Authorization": f"token {api_token}"}
+    )
+    user_token = resp.json()["token"]
+    os.environ["JUPYTERHUB_API_TOKEN"] = user_token
+
     app = Application(
         [
-            (os.environ['JUPYTERHUB_SERVICE_PREFIX'] + '/?', HubMetricsHandler),
-            (r'.*', HubMetricsHandler),
+            (
+                os.environ["JUPYTERHUB_SERVICE_PREFIX"] + "/?",
+                HubMetricsHandler,
+                {"args": args},
+            ),
+            (r".*", HubMetricsHandler, {"args": args}),
         ]
     )
 
     http_server = HTTPServer(app)
-    url = urlparse(os.environ['JUPYTERHUB_SERVICE_URL'])
+    url = urlparse(os.environ["JUPYTERHUB_SERVICE_URL"])
 
     http_server.listen(url.port, url.hostname)
 
     IOLoop.current().start()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
