@@ -29,7 +29,6 @@ class HubMetricsHandler(HubAuthenticated, RequestHandler):
         args = self.args
 
         out = subprocess.check_output(["hubtraf-check", args.hub_url, args.username])
-        print(out)
 
         encoder, content_type = exposition.choose_encoder(
             self.request.headers.get("Accept")
@@ -50,7 +49,7 @@ def main():
     api_url = os.environ["JUPYTERHUB_API_URL"]
 
     # Request a token for the user
-    token_request_url = url_path_join(api_url, "/users/monitor/tokens")
+    token_request_url = url_path_join(api_url, f"/users/{args.username}/tokens")
     resp = requests.post(
         token_request_url, headers={"Authorization": f"token {api_token}"}
     )
