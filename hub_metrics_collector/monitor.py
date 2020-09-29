@@ -3,9 +3,10 @@ import os
 import subprocess
 from urllib.parse import urlparse
 
+from jupyterhub.services.auth import HubAuthenticated
 from jupyterhub.utils import url_path_join
 import json
-from prometheus_client import Gauge, REGISTRY, exposition
+from prometheus_client import Gauge, Histogram, REGISTRY, exposition
 from tornado.httpserver import HTTPServer
 from tornado.ioloop import IOLoop
 from tornado.web import Application
@@ -16,8 +17,42 @@ import requests
 CHECK_COMPLETED = Gauge(
     "check_completed", "whether or not hubtraf-check completed successfully"
 )
+SERVER_START_DURATION_SECONDS = Histogram(
+    "server_start_duration_seconds", "Time taken to start the user server"
+)
+KERNEL_START_DURATION_SECONDS = Histogram(
+    "kernel_start_duration_seconds", "Time taken to start the user server"
+)
+CODE_EXECUTE_DURATION_SECONDS = Histogram(
+    "code_execute_duration_seconds", "Time taken to start the user server"
+)
+KERNEL_STOP_DURATION_SECONDS = Histogram(
+    "kernel_stop_duration_seconds", "Time taken to start the user server"
+)
+SERVER_STOP_DURATION_SECONDS = Histogram(
+    "server_stop_duration_seconds", "Time taken to start the user server"
+)
 
-from jupyterhub.services.auth import HubAuthenticated
+prometheus_metrics_aliases = {
+    "server-start": SERVER_START_DURATION_SECONDS,
+    "kernel-start": KERNEL_START_DURATION_SECONDS,
+    "code-execute": CODE_EXECUTE_DURATION_SECONDS,
+    "kernel-stop": KERNEL_STOP_DURATION_SECONDS,
+    "server-stop": SERVER_STOP_DURATION_SECONDS,
+}
+
+
+def parse_hubtraf_metrics(hubtraf_metics):
+    metrics = {}
+    for line in hubtraf_metics.splitlines():
+        if line.startswith("Success:"):
+            # words list example:
+            # ['Success:', 'server-start', 'hubtraf', 'duration:2.417068515002029']
+            words = line.split()
+            metric_name = words[1]
+            metric_duration = words[3].split(":")[1]
+            metrics[metric_name] = metric_duration
+    return metrics
 
 
 class HubMetricsHandler(HubAuthenticated, RequestHandler):
@@ -46,6 +81,12 @@ class HubMetricsHandler(HubAuthenticated, RequestHandler):
         """
         if hubtraf_metics.count("Success") == 5:
             CHECK_COMPLETED.set(1)
+
+        metrics = parse_hubtraf_metrics(hubtraf_metics)
+
+        # Collect metrics from hubtraf
+        for metric, duration in metrics.items():
+            prometheus_metrics_aliases[metric].observe(float(duration))
 
         encoder, content_type = exposition.choose_encoder(
             self.request.headers.get("Accept")
