@@ -3,13 +3,14 @@ import os
 import subprocess
 from urllib.parse import urlparse
 
+from jupyterhub.utils import url_path_join
+import json
 from prometheus_client import Gauge, REGISTRY, exposition
 from tornado.httpserver import HTTPServer
 from tornado.ioloop import IOLoop
 from tornado.web import Application
 from tornado.web import authenticated
 from tornado.web import RequestHandler
-from jupyterhub.utils import url_path_join
 import requests
 
 CHECK_COMPLETED = Gauge(
@@ -30,6 +31,22 @@ class HubMetricsHandler(HubAuthenticated, RequestHandler):
 
         out = subprocess.check_output(["hubtraf-check", args.hub_url, args.username])
 
+        hubtraf_metics_s = json.dumps(out.decode("utf-8"))
+        hubtraf_metics = json.loads(hubtraf_metics_s)
+
+        """
+        hubtraf-check has 6 phases and 5 of them return a "Success" message
+        when they complete successfully. These are:
+        - server-start
+        - kernel-start
+        - kernel-connect (this returns a debug "phase:complete" when done)
+        - code-execute
+        - kernel-stop
+        - server-stop
+        """
+        if hubtraf_metics.count("Success") == 5:
+            CHECK_COMPLETED.set(1)
+
         encoder, content_type = exposition.choose_encoder(
             self.request.headers.get("Accept")
         )
@@ -49,11 +66,14 @@ def main():
     api_url = os.environ["JUPYTERHUB_API_URL"]
 
     # Request a token for the user
+    # Serice needs to have admin rights
     token_request_url = url_path_join(api_url, f"/users/{args.username}/tokens")
     resp = requests.post(
         token_request_url, headers={"Authorization": f"token {api_token}"}
     )
     user_token = resp.json()["token"]
+    # hubtraf uses this env var for authorization, so we  need to make it be
+    # the user token
     os.environ["JUPYTERHUB_API_TOKEN"] = user_token
 
     app = Application(
