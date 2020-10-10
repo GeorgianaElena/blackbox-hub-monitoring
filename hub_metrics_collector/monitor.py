@@ -1,8 +1,11 @@
 import argparse
+from contextlib import redirect_stdout
+from enum import Enum
+import io
 import os
-import subprocess
 from urllib.parse import urlparse
 
+from hubtraf.check import check_user
 from jupyterhub.services.auth import HubAuthenticated
 from jupyterhub.utils import url_path_join
 import json
@@ -14,23 +17,26 @@ from tornado.web import authenticated
 from tornado.web import RequestHandler
 import requests
 
+
 CHECK_COMPLETED = Gauge(
     "check_completed", "whether or not hubtraf-check completed successfully"
 )
 SERVER_START_DURATION_SECONDS = Histogram(
-    "server_start_duration_seconds", "Time taken to start the user server"
+    "server_start_duration_seconds", "Time taken to start the user server", ["status"]
 )
 KERNEL_START_DURATION_SECONDS = Histogram(
-    "kernel_start_duration_seconds", "Time taken to start the user server"
+    "kernel_start_duration_seconds", "Time taken to start the kernel", ["status"]
 )
 CODE_EXECUTE_DURATION_SECONDS = Histogram(
-    "code_execute_duration_seconds", "Time taken to start the user server"
+    "code_execute_duration_seconds",
+    "Time taken to execute some simple code",
+    ["status"],
 )
 KERNEL_STOP_DURATION_SECONDS = Histogram(
-    "kernel_stop_duration_seconds", "Time taken to start the user server"
+    "kernel_stop_duration_seconds", "Time taken to stop the kernel", ["status"]
 )
 SERVER_STOP_DURATION_SECONDS = Histogram(
-    "server_stop_duration_seconds", "Time taken to start the user server"
+    "server_stop_duration_seconds", "Time taken to stop the user server", ["status"]
 )
 
 prometheus_metrics_aliases = {
@@ -42,17 +48,34 @@ prometheus_metrics_aliases = {
 }
 
 
-def parse_hubtraf_metrics(hubtraf_metics):
-    metrics = {}
-    for line in hubtraf_metics.splitlines():
-        if line.startswith("Success:"):
-            # words list example:
-            # ['Success:', 'server-start', 'hubtraf', 'duration:2.417068515002029']
-            words = line.split()
-            metric_name = words[1]
-            metric_duration = words[3].split(":")[1]
-            metrics[metric_name] = metric_duration
-    return metrics
+class ActionStatus(Enum):
+    """
+    Possible values for 'status' label of the metrics
+    """
+
+    success = "Success"
+    failure = "Failure"
+
+    def __str__(self):
+        return self.value
+
+
+for alias, metric in prometheus_metrics_aliases.items():
+    for s in ActionStatus:
+        metric.labels(status=s)
+
+
+def get_user_token(username):
+    api_token = os.environ["JUPYTERHUB_API_TOKEN"]
+    api_url = os.environ["JUPYTERHUB_API_URL"]
+
+    # Request a token for the user
+    # Serice needs to have admin rights
+    token_request_url = url_path_join(api_url, f"/users/{username}/tokens")
+    resp = requests.post(
+        token_request_url, headers={"Authorization": f"token {api_token}"}
+    )
+    return resp.json()["token"]
 
 
 class HubMetricsHandler(HubAuthenticated, RequestHandler):
@@ -62,31 +85,27 @@ class HubMetricsHandler(HubAuthenticated, RequestHandler):
 
     @authenticated
     async def get(self):
-        args = self.args
+        user_token = get_user_token(self.args.username)
 
-        out = subprocess.check_output(["hubtraf-check", args.hub_url, args.username])
+        text_stream = io.StringIO()
+        with redirect_stdout(text_stream):
+            hubtraf_check_status = await check_user(
+                self.args.hub_url, self.args.username, user_token, json=True
+            )
 
-        hubtraf_metics_s = json.dumps(out.decode("utf-8"))
-        hubtraf_metics = json.loads(hubtraf_metics_s)
-
-        """
-        hubtraf-check has 6 phases and 5 of them return a "Success" message
-        when they complete successfully. These are:
-        - server-start
-        - kernel-start
-        - kernel-connect (this returns a debug "phase:complete" when done)
-        - code-execute
-        - kernel-stop
-        - server-stop
-        """
-        if hubtraf_metics.count("Success") == 5:
+        if hubtraf_check_status == "completed":
             CHECK_COMPLETED.set(1)
 
-        metrics = parse_hubtraf_metrics(hubtraf_metics)
+        hubtraf_output = text_stream.getvalue()
 
         # Collect metrics from hubtraf
-        for metric, duration in metrics.items():
-            prometheus_metrics_aliases[metric].observe(float(duration))
+        for line in hubtraf_output.splitlines():
+            hubtraf_metric = json.loads(line)
+            status = hubtraf_metric["status"]
+            if status in ["Success", "Failure"]:
+                prometheus_metrics_aliases[hubtraf_metric["action"]].labels(
+                    status=status
+                ).observe(float(hubtraf_metric["duration"]))
 
         encoder, content_type = exposition.choose_encoder(
             self.request.headers.get("Accept")
@@ -102,20 +121,6 @@ def main():
     )
     argparser.add_argument("username", help="Name of the user")
     args = argparser.parse_args()
-
-    api_token = os.environ["JUPYTERHUB_API_TOKEN"]
-    api_url = os.environ["JUPYTERHUB_API_URL"]
-
-    # Request a token for the user
-    # Serice needs to have admin rights
-    token_request_url = url_path_join(api_url, f"/users/{args.username}/tokens")
-    resp = requests.post(
-        token_request_url, headers={"Authorization": f"token {api_token}"}
-    )
-    user_token = resp.json()["token"]
-    # hubtraf uses this env var for authorization, so we  need to make it be
-    # the user token
-    os.environ["JUPYTERHUB_API_TOKEN"] = user_token
 
     app = Application(
         [
